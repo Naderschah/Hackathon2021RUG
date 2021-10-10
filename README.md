@@ -6,3 +6,7 @@ TODO:
     - Figure out Sentinel-5p
     - Data overview with application intent
     - install file for packages (make virtual env)
+
+
+
+Make pandas dataframe and download for all datasets
