@@ -15,6 +15,7 @@ import zipfile
 from netCDF4 import Dataset
 from bs4 import BeautifulSoup
 import shapely.wkt
+from shapely.geometry import Point
 
 
 
@@ -39,7 +40,7 @@ class Sentinel:
         #Assign folder name
         self.filename = filename.split('.')[0]+folder_extension
 
-        self.files = self.get_file_tree()
+        self.files = self.get_file_tree(self.filename)
 
     def get_file_tree(self,path):
         """Creates nested tree structure from filepath
@@ -63,13 +64,50 @@ class Sentinel:
         pprint.pprint(self.files)
         return 0
 
-    def get_all_data(self, files):
+    def get_all_data(self, files=None):
         """
         Returns all files of file dictionary passed 
         Returns a non nested dictionary with content of each file
         """
         file_cont = {}
-        file_cont = self.iterate(file_cont, ['items'])
+        if files  == None:
+            return self.iterate(file_cont, self.files['items'])
+        else:
+            if 'items' in files: files = files['items']
+            return self.iterate(file_cont, files)
+
+    def format_geopandas(self, files, files_to_use): # TODO: Does not work with the netcdf files
+        """
+        Formats nc file directories into geopandas dataframe
+        """
+        crs = self.get_crs()
+        gml = self.get_gml().split(' ')
+        print(crs)
+        df = pd.DataFrame({'longitude':gml[::2], 'latitude':gml[1::2]})
+        
+        if crs == None:
+            print('Coordinate reference system could not be found')
+
+        geometry = gpd.points_from_xy(df.longitude, df.latitude, crs=crs)
+        
+        #Create Geopandas frame
+        #First we check that the arrays arent redundantly nested
+        for i in files_to_use:
+            if type(files[i])==list and len(files[i])==1 and type(files[i][0])!=float:
+                """In case the array is nested"""
+                files[i] = files[i][0]
+        #Next we create our dictionary object for pandas, since we are working with multidimensional data, we will make a seperate one for each
+        data_dict = {}
+        for i in files_to_use:
+            for j in range(len(files[i])):
+                # We will index the individual products based on their position
+                data_dict[i.split('_')[0]+'_'+str(j)] = files[i][j]
+                print(files[i].shape)
+        #Now we create a dataframe
+        df = pd.DataFrame(data=data_dict)
+        print(df)
+        return gpd.GeoDataFrame(df, geometry=geometry)#crs=crs, geometry=coord_dict)
+
     
     def iterate(self, file_dat_dict, file_dict):
         """Function to repetatively iterate json file and load content"""
@@ -83,7 +121,7 @@ class Sentinel:
                 #Call the same function with the items subset of file_dict (which contains the lower order files)
                 self.iterate(file_dat_dict,file_dict[i]['items'])
 
-            elif file_dict[i]['full_path'][-4::]=='safe' or file_dict[i]['full_path'][:-4:]=='.xml' or file_dict[i]['full_path'][:-4:]=='.xsd':
+            elif file_dict[i]['full_path'][-4::]=='safe' or file_dict[i]['full_path'][-4::]=='.xml' or file_dict[i]['full_path'][-4::]=='.xsd':
                 #This applies to all xml/xsd/safe formated files
                 file_dat_dict[name] = self.get_xml(file_dict[i]['full_path'])
 
@@ -95,7 +133,7 @@ class Sentinel:
                 """We will load all tiff files by default using Geotiff format"""   
                 file_dat_dict[name] = self.get_jp2(file_dict[i]['full_path'])
                 
-            elif file_dict[i]['full_path'][:-3:]=='.nc':
+            elif file_dict[i]['full_path'][-3::]=='.nc':
                 file_dat_dict[name] = self.get_nc(file_dict[i]['full_path'])
             #TODO: No file extension data
             elif len(file_dict[i]['full_path'].split('/')[-1].split('.'))==1:
@@ -105,7 +143,7 @@ class Sentinel:
 
         return file_dat_dict
 
-    def get_xml(file_path):
+    def get_xml(self,file_path):
         """Function to get xml/xsd/safe"""
         with open(file_path,'r') as f:
             file_cont = f.read()
@@ -119,7 +157,7 @@ class Sentinel:
         #Load the data (here the assumption is that the directory contains several nc files with geolocation and data files)
         for i in rootgrp.variables.keys():
             array.append(rootgrp[i][:])
-        return np.array(array, dtype=object)
+        return array
 
     def get_tiff(self, file_path):
         """Load tiff files (assumption that the files are geotiff)"""
@@ -155,22 +193,60 @@ class Sentinel:
         #Create Geopandas frame
         df = pd.DataFrame(data=data)
         geometry = gpd.points_from_xy(df.X, df.Y)
+        df = df['Z']
         return gpd.GeoDataFrame(df, crs=crs, geometry=geometry)
 
-    def get_crs(self, dat):
+    def get_crs(self, dat=None):
         """Function to get the coordinate reference system which is generally not included in jp2s"""
         #In case the crs is saved in the data file
-        if dat.crs != None:
-            return dat.crs
+        if dat != None:
+            if dat.crs != None:
+                return dat.crs
         
         #We now retrieve the crs from the manifest
-        try:
+        if os.path.isfile(os.path.join(self.filename, 'manifest.safe')):
             mainfest = self.get_xml(os.path.join(self.filename, 'manifest.safe'))
-        except:
+        elif os.path.isfile(os.path.join(self.filename, 'xfdumanifest.xml')):
+            mainfest = self.get_xml(os.path.join(self.filename, 'xfdumanifest.xml'))
+        else:
             return None
         for i in mainfest['xfdu:XFDU']['metadataSection']['metadataObject']:
             if i['@ID'] == 'measurementFrameSet':
-                crs=i['metadataWrap']['xmlData']['safe:frameSet']['safe:footPrint']['@srsName'].split('/')[-1].replace('.xml', '').split('#')
+                try:
+                    crs=i['metadataWrap']['xmlData']['safe:frameSet']['safe:footPrint']['@srsName'].split('/')[-1].replace('.xml', '').split('#')
+                except:
+                    crs=None
+                if crs == None:
+                    try:
+                        crs=i['metadataWrap']['xmlData']['sentinel-safe:frameSet']['sentinel-safe:footPrint']['@srsName'].split('/')[-3::]
+                        crs = crs[0::2]
+                    except:
+                        crs=None
+                return crs
+        #In case it doesnt find anything
+        return None
+
+    def get_gml(self):
+        """Function to get the coordinate reference system which is generally not included in jp2s"""
+        
+        #We now retrieve the gml from the manifest
+        if os.path.isfile(os.path.join(self.filename, 'manifest.safe')):
+            mainfest = self.get_xml(os.path.join(self.filename, 'manifest.safe'))
+        elif os.path.isfile(os.path.join(self.filename, 'xfdumanifest.xml')):
+            mainfest = self.get_xml(os.path.join(self.filename, 'xfdumanifest.xml'))
+        else:
+            return None
+        for i in mainfest['xfdu:XFDU']['metadataSection']['metadataObject']:
+            if i['@ID'] == 'measurementFrameSet':
+                try:
+                    crs=i['metadataWrap']['xmlData']['safe:frameSet']['safe:footPrint']['gml:posList']
+                except:
+                    crs=None
+                if crs == None:
+                    try:
+                        crs=i['metadataWrap']['xmlData']['sentinel-safe:frameSet']['sentinel-safe:footPrint']['gml:posList']
+                    except:
+                        crs=None
                 return crs
         #In case it doesnt find anything
         return None
@@ -186,8 +262,8 @@ class Sentinel:
         ax = gpd.read_file('world.geo.json').plot(color='white', edgecolor='black',figsize=(16,16))
 
         # We have to turn the well-known Text (wkl) footprint into a shapely object which then gets loaded into a geodataframe to ease plotting
-        data_geometry = shapely.wkt.loads(odata["footprint"])
-        if gpd_frame!=None:
-            gpd_frame.plot(ax=ax,facecolor="none",edgecolor='red')
+        
+        if type(gpd_frame)!=None:
+            gpd_frame.plot(ax=ax,column='Z',cmap='plasma')
 
         return ax
