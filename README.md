@@ -1,12 +1,5 @@
 # Hackathon2021RUG
 
-TODO:
-    - Write this
-    - Get rest of data
-    - Figure out Sentinel-5p
-    - Data overview with application intent
-    - install file for packages (make virtual env)
+Several Notebooks showing how to download the Sentinel satelite data, 
 
-
-
-Make pandas dataframe and download for all datasets
+Quick instructions are given as to how they can be opened using python, a small class is included for this purpose as well allthough it should not be used for larger datasets
